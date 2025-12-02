@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { GoogleGenAI, Type, Schema } from "@google/genai";
@@ -48,6 +47,40 @@ interface Question {
 
 type AppState = "menu" | "loading" | "quiz" | "results" | "error";
 
+// --- Helper Functions ---
+
+const shuffleOptions = (questions: any[]): Question[] => {
+  return questions.map((q) => {
+    // Create an array of objects to track original values and indices
+    const optionsWithIndices = q.options.map((opt: string, index: number) => ({
+      opt,
+      originalIndex: index,
+    }));
+
+    // Shuffle the array
+    for (let i = optionsWithIndices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [optionsWithIndices[i], optionsWithIndices[j]] = [optionsWithIndices[j], optionsWithIndices[i]];
+    }
+
+    // Extract shuffled options and find new correct index
+    const shuffledOptions = optionsWithIndices.map((o: any) => o.opt);
+    const newCorrectIndex = optionsWithIndices.findIndex((o: any) => o.originalIndex === q.correctAnswerIndex);
+
+    return {
+      ...q,
+      options: shuffledOptions,
+      correctAnswerIndex: newCorrectIndex,
+    };
+  });
+};
+
+const formatTime = (seconds: number) => {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
 // --- API Logic ---
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -55,20 +88,23 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const generateQuestions = async (config: MondaiConfig): Promise<Question[]> => {
   let specificPrompt = "";
   
+  // Prompts updated to explicitly request HTML formatting for underlines and blanks to ensure visibility
   switch (config.id) {
     case "vocab_readings":
       specificPrompt = `Generate ${config.count} JLPT N1 "Kanji Reading" (Problem 1) questions. 
-      Format: A sentence with a complex N1 Kanji word underlined (using HTML <u> tag). 
+      Format: A sentence with a complex N1 Kanji word underlined. 
+      CRITICAL VISUAL REQUIREMENT: Wrap the target kanji word in <span class="border-b-2 border-stone-800 font-bold px-1">word</span> so the underline is clearly visible. Do NOT use simple <u> tags.
       Options: 4 Hiragana reading choices. Distractors should be very similar readings.`;
       break;
     case "vocab_context":
       specificPrompt = `Generate ${config.count} JLPT N1 "Context" (Problem 2) questions. 
-      Format: A sentence with a blank (____). 
+      Format: A sentence with a blank represented exactly by "(　　　)".
       Options: 4 N1 vocabulary words. Only one fits the context.`;
       break;
     case "vocab_paraphrase":
       specificPrompt = `Generate ${config.count} JLPT N1 "Paraphrase" (Problem 3) questions. 
       Format: A sentence with an N1 word underlined. 
+      CRITICAL VISUAL REQUIREMENT: Wrap the target word in <span class="border-b-2 border-stone-800 font-bold px-1">word</span>.
       Options: 4 words or phrases. Choose the one with the closest meaning to the underlined part.`;
       break;
     case "vocab_usage":
@@ -78,12 +114,15 @@ const generateQuestions = async (config: MondaiConfig): Promise<Question[]> => {
       break;
     case "grammar_selection":
       specificPrompt = `Generate ${config.count} JLPT N1 "Grammar Selection" (Problem 5) questions. 
-      Format: A sentence with a blank. 
+      Format: A sentence with a missing grammar part.
+      CRITICAL VISUAL REQUIREMENT: Represent the blank exactly as "(　　　)". Do not use underscores.
       Options: 4 N1 grammar points.`;
       break;
     case "grammar_order":
       specificPrompt = `Generate ${config.count} JLPT N1 "Sentence Composition" (Problem 6) questions. 
-      Format: A sentence with 4 blanks, one marked with a star (★). Example: "私 ____ ____ __★__ ____ です。". 
+      Format: A sentence with 4 blanks, one marked with a star (★). 
+      CRITICAL VISUAL REQUIREMENT: Use exactly this format for the blanks in the sentence: "<span class='border-b border-stone-400 inline-block w-8 mx-1'></span> <span class='border-b border-stone-400 inline-block w-8 mx-1'></span> <span class='border-b border-stone-800 font-bold inline-block w-8 mx-1 text-center'>★</span> <span class='border-b border-stone-400 inline-block w-8 mx-1'></span>".
+      Example: "私 <span class='border-b border-stone-400 inline-block w-8 mx-1'></span> <span class='border-b border-stone-400 inline-block w-8 mx-1'></span> <span class='border-b border-stone-800 font-bold inline-block w-8 mx-1 text-center'>★</span> <span class='border-b border-stone-400 inline-block w-8 mx-1'></span> です。"
       Options: 4 words or fragments to fill the blanks. 
       Correct Answer: The index of the option that goes in the ★ position. 
       Explanation: Explain the correct full sentence order.`;
@@ -128,9 +167,7 @@ const generateQuestions = async (config: MondaiConfig): Promise<Question[]> => {
             question: { type: Type.STRING, description: "The question text (can include HTML)." },
             options: { 
               type: Type.ARRAY, 
-              items: { type: Type.STRING },
-              minItems: 4,
-              maxItems: 4
+              items: { type: Type.STRING }
             },
             correctAnswerIndex: { type: Type.INTEGER, description: "0-3 index." },
             explanation: { type: Type.STRING },
@@ -157,7 +194,10 @@ const generateQuestions = async (config: MondaiConfig): Promise<Question[]> => {
       // Map to add IDs and Category
       const rawQuestions = parsed.questions || parsed; // Handle potential schema variance
       if (Array.isArray(rawQuestions)) {
-        return rawQuestions.map((q: any) => ({
+        // Shuffle options here to ensure randomness and avoid model bias
+        const randomizedQuestions = shuffleOptions(rawQuestions);
+        
+        return randomizedQuestions.map((q: any) => ({
           ...q,
           id: `${config.id}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           categoryLabel: config.label,
@@ -305,13 +345,22 @@ const Quiz = ({
 }: { 
   questions: Question[], 
   config: MondaiConfig,
-  onFinish: (score: number, total: number) => void,
+  onFinish: (score: number, total: number, timeSpent: number) => void,
   onAnswerReport: (question: Question, isCorrect: boolean) => void
 }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [isChecked, setIsChecked] = useState(false);
   const [score, setScore] = useState(0);
+  const [seconds, setSeconds] = useState(0);
+
+  // Timer logic
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSeconds(s => s + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const currentQ = questions[currentIndex];
   // Handle case where questions might be empty due to aggressive filtering (edge case)
@@ -355,7 +404,7 @@ const Quiz = ({
       setSelectedOption(null);
       setIsChecked(false);
     } else {
-      onFinish(score + (selectedOption === currentQ.correctAnswerIndex ? 0 : 0), questions.length); 
+      onFinish(score + (selectedOption === currentQ.correctAnswerIndex ? 0 : 0), questions.length, seconds); 
     }
   };
 
@@ -372,9 +421,16 @@ const Quiz = ({
             </span>
             <span className="text-xs text-stone-400 ml-2">{config.subLabel}</span>
           </div>
-          <span className="text-sm font-bold text-stone-600">
-            {currentIndex + 1} <span className="text-stone-300">/</span> {questions.length}
-          </span>
+          <div className="flex items-center gap-4">
+             {/* Timer Display */}
+            <div className="flex items-center text-stone-500 font-mono text-sm bg-white px-2 py-1 rounded border border-stone-200 shadow-sm">
+                <svg className="w-4 h-4 mr-1 text-stone-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                {formatTime(seconds)}
+            </div>
+            <span className="text-sm font-bold text-stone-600">
+                {currentIndex + 1} <span className="text-stone-300">/</span> {questions.length}
+            </span>
+          </div>
         </div>
         <div className="h-1.5 bg-stone-200 rounded-full overflow-hidden">
           <div 
@@ -497,10 +553,12 @@ const Quiz = ({
 const Results = ({ 
   score, 
   total, 
+  timeSpent,
   onRestart 
 }: { 
   score: number, 
   total: number, 
+  timeSpent: number,
   onRestart: () => void 
 }) => {
   const percentage = total > 0 ? Math.round((score / total) * 100) : 0;
@@ -535,9 +593,19 @@ const Results = ({
           </div>
         </div>
 
+        <div className="mb-6 grid grid-cols-2 gap-4">
+           <div className="bg-stone-50 p-3 rounded-lg">
+             <span className="block text-xs text-stone-400 uppercase tracking-wide">正答率</span>
+             <span className="font-bold text-lg text-stone-700">{percentage}%</span>
+           </div>
+           <div className="bg-stone-50 p-3 rounded-lg">
+             <span className="block text-xs text-stone-400 uppercase tracking-wide">タイム</span>
+             <span className="font-bold text-lg text-stone-700">{formatTime(timeSpent)}</span>
+           </div>
+        </div>
+
         <div className="mb-8">
-           <p className="text-lg font-bold text-indigo-900 mb-1">{message}</p>
-           <p className="text-sm text-stone-500">正答率 {percentage}%</p>
+           <p className="text-lg font-bold text-indigo-900">{message}</p>
         </div>
 
         <button 
@@ -561,6 +629,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>("menu");
   const [questions, setQuestions] = useState<Question[]>([]);
   const [finalScore, setFinalScore] = useState(0);
+  const [finalTime, setFinalTime] = useState(0);
   const [activeConfig, setActiveConfig] = useState<MondaiConfig | null>(null);
   const [mistakeBank, setMistakeBank] = useState<Question[]>([]);
   const [masteredBank, setMasteredBank] = useState<string[]>([]); // Array of question text
@@ -631,7 +700,8 @@ export default function App() {
          setAppState("menu");
          return;
        }
-       const shuffled = [...mistakeBank].sort(() => 0.5 - Math.random());
+       // Shuffle mistakes for review
+       const shuffled = shuffleOptions([...mistakeBank].sort(() => 0.5 - Math.random()));
        setQuestions(shuffled);
        setAppState("quiz");
        return;
@@ -645,10 +715,6 @@ export default function App() {
       
       if (freshQuestions.length === 0 && qs.length > 0) {
         // Edge case: All questions returned were already mastered.
-        // In a real app we might re-fetch, but for now we present a message or just the original set
-        // to avoid infinite loading loops or empty screens.
-        // We will fallback to showing them but usually this means the user practiced A LOT.
-        // Ideally we should prompt the model again, but let's just show them to avoid breaking flow.
         console.warn("All generated questions were previously mastered. Showing anyway.");
         setQuestions(qs);
       } else {
@@ -673,8 +739,9 @@ export default function App() {
     startQuiz(config);
   };
 
-  const handleFinish = (score: number, total: number) => {
+  const handleFinish = (score: number, total: number, timeSpent: number) => {
     setFinalScore(score);
+    setFinalTime(timeSpent);
     setAppState("results");
   };
 
@@ -682,6 +749,7 @@ export default function App() {
     setAppState("menu");
     setQuestions([]);
     setFinalScore(0);
+    setFinalTime(0);
     setActiveConfig(null);
   };
 
@@ -704,7 +772,7 @@ export default function App() {
           onAnswerReport={handleAnswerReport}
         />
       )}
-      {appState === "results" && <Results score={finalScore} total={questions.length} onRestart={handleRestart} />}
+      {appState === "results" && <Results score={finalScore} total={questions.length} timeSpent={finalTime} onRestart={handleRestart} />}
     </>
   );
 }
